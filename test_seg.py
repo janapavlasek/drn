@@ -1,14 +1,13 @@
 
 import os
 import sys
-import shutil
 import argparse
 
 import torch
 from torch.backends import cudnn
 from torch import nn
 
-from drn import get_logger, save_checkpoint
+from drn import get_logger
 from drn.segment import build_model, test, test_ms, train, validate, make_data_loader
 
 logger = None
@@ -39,9 +38,8 @@ def train_seg(args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
-    cudnn.benchmark = True
-    best_prec1 = 0
     start_epoch = 0
+    best_prec1 = 0
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -60,25 +58,8 @@ def train_seg(args):
         validate(val_loader, model, criterion)
         return
 
-    for epoch in range(start_epoch, args.epochs):
-        # train for one epoch
-        train(args, train_loader, model, criterion, optimizer, epoch)
-
-        # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion)
-
-        is_best = prec1 > best_prec1
-        best_prec1 = max(prec1, best_prec1)
-        checkpoint_path = os.path.join(args.out_dir, 'checkpoint_latest.pth.tar')
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'arch': args.arch,
-            'state_dict': model.state_dict(),
-            'best_prec1': best_prec1,
-        }, is_best, filename=checkpoint_path)
-        if (epoch + 1) % 1 == 0:
-            history_path = os.path.join(args.out_dir, 'checkpoint_{:03d}.pth.tar'.format(epoch + 1))
-            shutil.copyfile(checkpoint_path, history_path)
+    train(args, train_loader, val_loader, model, criterion, optimizer,
+          start_epoch=start_epoch, best_prec1=best_prec1)
 
 
 def test_seg(args):
