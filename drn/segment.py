@@ -9,10 +9,10 @@ import shutil
 import threading
 import numpy as np
 from PIL import Image
+from collections import OrderedDict
 
 import torch
 from torch import nn
-from torch.utils.data import Dataset
 from torch.backends import cudnn
 
 from . import drn
@@ -21,33 +21,13 @@ from .stats import AverageMeter, sec_to_str, accuracy
 from .log_util import setup_logger
 from .io_util import save_output_images, save_colorful_images, save_checkpoint
 from . import data_transforms as transforms
+from .datasets.seg_list import SegList, SegListMS, CITYSCAPE_PALETTE
+from .datasets.progress_tools import ProgressTools, ProgressToolParts
 
 try:
     from modules import batchnormsync
 except ImportError:
     pass
-
-CITYSCAPE_PALETTE = np.asarray([
-    [128, 64, 128],
-    [244, 35, 232],
-    [70, 70, 70],
-    [102, 102, 156],
-    [190, 153, 153],
-    [153, 153, 153],
-    [250, 170, 30],
-    [220, 220, 0],
-    [107, 142, 35],
-    [152, 251, 152],
-    [70, 130, 180],
-    [220, 20, 60],
-    [255, 0, 0],
-    [0, 0, 142],
-    [0, 0, 70],
-    [0, 60, 100],
-    [0, 80, 100],
-    [0, 0, 230],
-    [119, 11, 32],
-    [0, 0, 0]], dtype=np.uint8)
 
 
 TRIPLET_PALETTE = np.asarray([
@@ -110,126 +90,6 @@ class DRNSeg(nn.Module):
             yield param
         for param in self.seg.parameters():
             yield param
-
-
-class SegList(Dataset):
-
-    CLASSES = ['road',
-               'sidewalk',
-               'building',
-               'wall',
-               'fence',
-               'pole',
-               'trafficlight',
-               'trafficsign',
-               'vegetation',
-               'terrain',
-               'sky',
-               'person',
-               'rider',
-               'car',
-               'truck',
-               'bus',
-               'train',
-               'motorcycle',
-               'bicycle']
-
-    def __init__(self, data_dir, phase, trans, list_dir=None,
-                 out_name=False):
-        self.list_dir = data_dir if list_dir is None else list_dir
-        self.data_dir = data_dir
-        self.out_name = out_name
-        self.phase = phase
-        self.transforms = trans
-        self.image_list = None
-        self.label_list = None
-        self.bbox_list = None
-        self.read_lists()
-
-    def __getitem__(self, index):
-        data = [Image.open(os.path.join(self.data_dir, self.image_list[index]))]
-        if self.label_list is not None:
-            data.append(Image.open(
-                os.path.join(self.data_dir, self.label_list[index])))
-        data = list(self.transforms(*data))
-        if self.out_name:
-            if self.label_list is None:
-                data.append(data[0][0, :, :])
-            data.append(self.image_list[index])
-        return tuple(data)
-
-    def __len__(self):
-        return len(self.image_list)
-
-    def read_lists(self):
-        image_path = os.path.join(self.list_dir, self.phase + '_images.txt')
-        label_path = os.path.join(self.list_dir, self.phase + '_labels.txt')
-        assert os.path.exists(image_path)
-        self.image_list = [line.strip() for line in open(image_path, 'r')]
-        if os.path.exists(label_path):
-            self.label_list = [line.strip() for line in open(label_path, 'r')]
-            assert len(self.image_list) == len(self.label_list)
-
-
-class SegListMS(Dataset):
-
-    CLASSES = ['road',
-               'sidewalk',
-               'building',
-               'wall',
-               'fence',
-               'pole',
-               'trafficlight',
-               'trafficsign',
-               'vegetation',
-               'terrain',
-               'sky',
-               'person',
-               'rider',
-               'car',
-               'truck',
-               'bus',
-               'train',
-               'motorcycle',
-               'bicycle']
-
-    def __init__(self, data_dir, phase, trans, scales, list_dir=None):
-        self.list_dir = data_dir if list_dir is None else list_dir
-        self.data_dir = data_dir
-        self.phase = phase
-        self.transforms = trans
-        self.image_list = None
-        self.label_list = None
-        self.bbox_list = None
-        self.read_lists()
-        self.scales = scales
-
-    def __getitem__(self, index):
-        data = [Image.open(os.path.join(self.data_dir, self.image_list[index]))]
-        w, h = data[0].size
-        if self.label_list is not None:
-            data.append(Image.open(
-                os.path.join(self.data_dir, self.label_list[index])))
-        # data = list(self.transforms(*data))
-        out_data = list(self.transforms(*data))
-        ms_images = [self.transforms(data[0].resize((int(w * s), int(h * s)),
-                                                    Image.BICUBIC))[0]
-                     for s in self.scales]
-        out_data.append(self.image_list[index])
-        out_data.extend(ms_images)
-        return tuple(out_data)
-
-    def __len__(self):
-        return len(self.image_list)
-
-    def read_lists(self):
-        image_path = os.path.join(self.list_dir, self.phase + '_images.txt')
-        label_path = os.path.join(self.list_dir, self.phase + '_labels.txt')
-        assert os.path.exists(image_path)
-        self.image_list = [line.strip() for line in open(image_path, 'r')]
-        if os.path.exists(label_path):
-            self.label_list = [line.strip() for line in open(label_path, 'r')]
-            assert len(self.image_list) == len(self.label_list)
 
 
 def adjust_learning_rate(args, optimizer, epoch):
@@ -298,45 +158,76 @@ def build_model(arch, num_classes, pretrained=None):
     single_model = DRNSeg(arch, num_classes, None, pretrained=True)
 
     if pretrained:
-        single_model.load_state_dict(torch.load(pretrained))
+        data = torch.load(pretrained)
+        if "state_dict" in data:
+            state_dict = data["state_dict"]
+            state_dict = OrderedDict([(k.replace("module.", ""), v) for k, v in state_dict.items()])
+            single_model.load_state_dict(state_dict)
+        else:
+            single_model.load_state_dict(data)
     model = torch.nn.DataParallel(single_model).cuda()
 
     return model
 
 
-def make_data_loader(split, data_dir, list_dir, batch_size=4, workers=1,
-                     ms=False, random_rotate=0, random_scale=0, crop_size=None, scales=None):
+def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, workers=1,
+                     ms=False, num_transforms=0, random_rotate=None, random_scale=None,
+                     crop_sizes=None, scales=None, background=True):
     if split not in ('train', 'test', 'val'):
         raise Exception("Split {} mut be one of ('train', 'test', 'val')".format(split))
 
     t = []
+    t_always = []
 
+    # if dataset_name == "seglist":
     if split == 'train':
-        if random_rotate > 0:
+        if random_rotate is not None:
             t.append(transforms.RandomRotate(random_rotate))
-        if random_scale > 0:
+        if random_scale is not None:
             t.append(transforms.RandomScale(random_scale))
 
         t.append(transforms.RandomHorizontalFlip())
 
     if split == 'val' or split == 'train':
-        if crop_size is not None:
-            t.append(transforms.RandomCrop(crop_size))
+        if crop_sizes is not None:
+            t.append(transforms.RandomCrop(crop_sizes))
 
-    info = json.load(open(os.path.join(data_dir, 'info.json'), 'r'))
-    normalize = transforms.Normalize(mean=info['mean'], std=info['std'])
+        t.append(transforms.PadToSize())
 
-    t.extend([transforms.ToTensor(), normalize])
+    t_always.append(transforms.ToTensor())
+
+    if os.path.exists(os.path.join(data_dir, 'info.json')):
+        info = json.load(open(os.path.join(data_dir, 'info.json'), 'r'))
+        normalize = transforms.Normalize(mean=info['mean'], std=info['std'])
+
+        t_always.append(normalize)
 
     shuffle = split == 'train'
 
-    if ms and split == 'test' and scales is not None:
-        dataset = SegListMS(data_dir, split, transforms.Compose(t), scales, list_dir=list_dir)
-    else:
-        if split == 'test':
-            dataset = SegList(data_dir, split, transforms.Compose(t), list_dir=list_dir, out_name=True)
+    # Provide the name of the image if we are testing.
+    out_name = split == "test"
+
+    if dataset_name == "seglist":
+        if ms and split == 'test' and scales is not None:
+            dataset = SegListMS(data_dir, split, transforms.Compose(t + t_always), scales, list_dir=list_dir)
         else:
-            dataset = SegList(data_dir, split, transforms.Compose(t), list_dir=list_dir)
+            dataset = SegList(data_dir, split, transforms.Compose(t + t_always), list_dir=list_dir, out_name=out_name)
+    elif dataset_name == "progress_tools":
+        if split == "train":
+            dataset = ProgressTools(data_dir, split, transforms.Compose(t), transforms.Compose(t_always),
+                                    num_transforms=num_transforms, out_name=out_name, background=background)
+        else:
+            dataset = ProgressTools(data_dir, split, None, transforms.Compose(t_always),
+                                    out_name=out_name, background=background)
+    elif dataset_name == "progress_tool_parts":
+        if split == "train":
+            dataset = ProgressToolParts(data_dir, split, transforms.Compose(t), transforms.Compose(t_always),
+                                        num_transforms=num_transforms, out_name=out_name, background=background)
+        else:
+            dataset = ProgressTools(data_dir, split, None, transforms.Compose(t_always),
+                                    out_name=out_name, background=background)
+    else:
+        raise Exception("Unrecognized dataset {}".format(dataset_name))
 
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -392,8 +283,9 @@ def validate(val_loader, model, criterion, eval_score=accuracy, print_freq=10):
     return score.avg
 
 
-def train(args, train_loader, val_loader, model, criterion, optimizer,
-          start_epoch=0, eval_score=accuracy, print_freq=10, best_prec1=0):
+def train(args, train_loader, model, criterion, optimizer,
+          val_loader=None, start_epoch=0, eval_score=accuracy,
+          print_freq=10, best_prec1=0):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -462,10 +354,13 @@ def train(args, train_loader, val_loader, model, criterion, optimizer,
                                 batch_time=batch_time, data_time=data_time, loss=losses, top1=scores))
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion)
+        is_best = False
+        if val_loader is not None:
+            prec1 = validate(val_loader, model, criterion)
 
-        is_best = prec1 > best_prec1
-        best_prec1 = max(prec1, best_prec1)
+            is_best = prec1 > best_prec1
+            best_prec1 = max(prec1, best_prec1)
+
         checkpoint_path = os.path.join(args.out_dir, 'checkpoint_latest.pth.tar')
         save_checkpoint({
             'epoch': epoch + 1,

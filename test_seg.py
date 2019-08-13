@@ -24,11 +24,11 @@ def train_seg(args):
 
     criterion.cuda()
 
-    train_loader = make_data_loader('train', args.data_dir, args.list_dir,
+    train_loader = make_data_loader('train', args.dataset, args.data_dir, args.list_dir,
                                     batch_size=args.batch_size, workers=args.workers,
                                     random_rotate=args.random_rotate, random_scale=args.random_scale,
                                     crop_size=args.crop_size)
-    val_loader = make_data_loader('val', args.data_dir, args.list_dir,
+    val_loader = make_data_loader('val', args.dataset, args.data_dir, args.list_dir,
                                   batch_size=args.batch_size, workers=args.workers,
                                   crop_size=args.crop_size)
 
@@ -58,7 +58,7 @@ def train_seg(args):
         validate(val_loader, model, criterion)
         return
 
-    train(args, train_loader, val_loader, model, criterion, optimizer,
+    train(args, train_loader, model, criterion, optimizer, val_loader=val_loader,
           start_epoch=start_epoch, best_prec1=best_prec1)
 
 
@@ -74,7 +74,7 @@ def test_seg(args):
 
     scales = [0.5, 0.75, 1.25, 1.5, 1.75]
 
-    test_loader = make_data_loader(phase, args.data_dir, args.list_dir,
+    test_loader = make_data_loader(phase, args.dataset, args.data_dir, args.list_dir,
                                    batch_size=args.batch_size, workers=args.workers,
                                    ms=args.ms, scales=scales)
 
@@ -116,6 +116,7 @@ def parse_args():
     # Training settings
     parser = argparse.ArgumentParser(description='')
     parser.add_argument('cmd', choices=['train', 'test'])
+    parser.add_argument('--dataset', type=str, default="seglist")
     parser.add_argument('-d', '--data-dir', default=None, required=True)
     parser.add_argument('-l', '--list-dir', default=None,
                         help='List dir to look for train_images.txt etc. '

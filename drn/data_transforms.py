@@ -8,18 +8,39 @@ import torch
 
 class RandomCrop(object):
     def __init__(self, size):
-        if isinstance(size, numbers.Number):
-            self.size = (int(size), int(size))
-        else:
-            self.size = size
+        # if isinstance(size, numbers.Number):
+        #     self.size = (int(size), int(size))
+        # elif isinstance(size, list):
+        #     self.size = [(int(i), int(i)) if isinstance(i, numbers.Number) else i for i in size]
+        # else:
+        self.size = size
 
     def __call__(self, image, label, *args):
-        assert label is None or image.size == label.size, \
-            "image and label doesn't have the same size {} / {}".format(
-                image.size, label.size)
+        dim1 = random.randint(self.size[0], self.size[1])
+        dim2 = random.randint(self.size[0], self.size[1])
+
+        if dim1 >= dim2:
+            tw = dim1
+            th = dim2
+        else:
+            tw = dim2
+            th = dim1
+        # if isinstance(self.size, list):
+        #     size = random.choice(self.size)
+        #     # size = np.random.choice(self.size)
+        # else:
+        #     size = self.size
+        # assert label is None or image.size == label.size, \
+        #     "image and label doesn't have the same size {} / {}".format(
+        #         image.size, label.size)
 
         w, h = image.size
-        tw, th = self.size
+        tw = min(tw, w)
+        th = min(th, h)
+        if w == tw and h == th:
+            return (image, label, *args)
+
+        # tw, th = size
         top = bottom = left = right = 0
         if w < tw:
             left = (tw - w) // 2
@@ -32,15 +53,14 @@ class RandomCrop(object):
                 'constant', label, top, bottom, left, right, value=255)
             image = pad_image(
                 'reflection', image, top, bottom, left, right)
-        w, h = image.size
-        if w == tw and h == th:
-            return (image, label, *args)
 
         x1 = random.randint(0, w - tw)
         y1 = random.randint(0, h - th)
-        results = [image.crop((x1, y1, x1 + tw, y1 + th))]
+        crop = image.crop((x1, y1, x1 + tw, y1 + th))
+        results = [crop]
         if label is not None:
-            results.append(label.crop((x1, y1, x1 + tw, y1 + th)))
+            lab_crop = label.crop((x1, y1, x1 + tw, y1 + th))
+            results.append(lab_crop)
         results.extend(args)
         return results
 
@@ -63,7 +83,7 @@ class RandomScale(object):
         else:
             interpolation = Image.CUBIC
         return image.resize((tw, th), interpolation), \
-               label.resize((tw, th), Image.NEAREST)
+            label.resize((tw, th), Image.NEAREST)
 
 
 class RandomRotate(object):
@@ -80,7 +100,11 @@ class RandomRotate(object):
 
         w, h = image.size
         p = max((h, w))
-        angle = random.randint(0, self.angle * 2) - self.angle
+
+        if isinstance(self.angle, tuple):
+            angle = random.uniform(*self.angle)
+        else:
+            angle = random.randint(0, self.angle * 2) - self.angle
 
         if label is not None:
             label = pad_image('constant', label, h, h, w, w, value=255)
@@ -125,6 +149,61 @@ class Normalize(object):
             return image, label
 
 
+class PadToSize(object):
+    def __init__(self, size=(640, 480)):
+        self.size = size
+
+    def __call__(self, image, label=None, *args):
+        image = image.resize(self.size)
+        data = [image]
+
+        if label is not None:
+            label = label.resize(self.size)
+            data.append(label)
+
+        data.extend(args)
+        return data
+
+        if self.size[0] == image.size[0] and self.size[1] == image.size[1]:
+            data = [image]
+            if label is not None:
+                data.append(label)
+
+            data.extend(args)
+            return data
+
+        if self.size[0] < image.size[0]:
+            too_big = image.size[0] - self.size[0]
+            left_crop = too_big / 2
+            image = image.crop((left_crop, 0, left_crop + self.size[0], self.size[1]))
+            if label is not None:
+                label = label.crop((left_crop, 0, left_crop + self.size[0], self.size[1]))
+
+        if self.size[1] < image.size[1]:
+            too_big = image.size[1] - self.size[1]
+            top_crop = too_big / 2
+            image = image.crop((0, top_crop, self.size[1], top_crop + self.size[1]))
+            if label is not None:
+                label = label.crop((0, top_crop, self.size[1], top_crop + self.size[1]))
+
+        missing_horiz = self.size[0] - image.size[0]
+        missing_vert = self.size[1] - image.size[1]
+
+        top = int(missing_vert / 2)
+        bottom = self.size[1] - image.size[1] - top
+        left = int(missing_horiz / 2)
+        right = self.size[0] - image.size[0] - left
+        image = pad_image('reflection', image, top, bottom, left, right)
+        data = [image]
+        if label is not None:
+            label = pad_image('constant', label, top, bottom, left, right, value=255)
+            data.append(label)
+
+        data.extend(args)
+
+        return data
+
+
 def pad_reflection(image, top, bottom, left, right):
     if top == 0 and bottom == 0 and left == 0 and right == 0:
         return image
@@ -146,11 +225,11 @@ def pad_reflection(image, top, bottom, left, right):
     new_shape[0] += top + bottom
     new_shape[1] += left + right
     new_image = np.empty(new_shape, dtype=image.dtype)
-    new_image[top:top+h, left:left+w] = image
-    new_image[:top, left:left+w] = image[top:0:-1, :]
-    new_image[top+h:, left:left+w] = image[-1:-bottom-1:-1, :]
-    new_image[:, :left] = new_image[:, left*2:left:-1]
-    new_image[:, left+w:] = new_image[:, -right-1:-right*2-1:-1]
+    new_image[top:top + h, left:left + w] = image
+    new_image[:top, left:left + w] = image[top:0:-1, :]
+    new_image[top + h:, left:left + w] = image[-1:-bottom - 1:-1, :]
+    new_image[:, :left] = new_image[:, left * 2:left:-1]
+    new_image[:, left + w:] = new_image[:, -right - 1:-right * 2 - 1:-1]
     return pad_reflection(new_image, next_top, next_bottom,
                           next_left, next_right)
 
@@ -164,7 +243,7 @@ def pad_constant(image, top, bottom, left, right, value):
     new_shape[1] += left + right
     new_image = np.empty(new_shape, dtype=image.dtype)
     new_image.fill(value)
-    new_image[top:top+h, left:left+w] = image
+    new_image[top:top + h, left:left + w] = image
     return new_image
 
 
@@ -185,7 +264,7 @@ class Pad(object):
     def __init__(self, padding, fill=0):
         assert isinstance(padding, numbers.Number)
         assert isinstance(fill, numbers.Number) or isinstance(fill, str) or \
-               isinstance(fill, tuple)
+            isinstance(fill, tuple)
         self.padding = padding
         self.fill = fill
 
@@ -211,7 +290,7 @@ class PadImage(object):
     def __init__(self, padding, fill=0):
         assert isinstance(padding, numbers.Number)
         assert isinstance(fill, numbers.Number) or isinstance(fill, str) or \
-               isinstance(fill, tuple)
+            isinstance(fill, tuple)
         self.padding = padding
         self.fill = fill
 
@@ -261,6 +340,15 @@ class Compose(object):
         self.transforms = transforms
 
     def __call__(self, *args):
+        # print("----------------------------------")
         for t in self.transforms:
+            # print("Transform", type(t))
+            # print(*args)
             args = t(*args)
+            # print("returned")
+            # for a in args:
+            #     if type(a) == torch.Tensor:
+            #         print("\ttensor size", a.shape)
+            #     else:
+            #         print("\t", a)
         return args
