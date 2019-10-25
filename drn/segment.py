@@ -18,7 +18,7 @@ from torch.backends import cudnn
 from . import drn
 
 from .stats import AverageMeter, sec_to_str, accuracy
-from .log_util import setup_logger
+from .log_util import DRNLogger
 from .io_util import save_output_images, save_colorful_images, save_checkpoint
 from . import data_transforms as transforms
 from .datasets.seg_list import SegList, SegListMS, CITYSCAPE_PALETTE
@@ -34,8 +34,6 @@ TRIPLET_PALETTE = np.asarray([
     [0, 0, 0, 255],
     [217, 83, 79, 255],
     [91, 192, 222, 255]], dtype=np.uint8)
-
-logger = setup_logger(__name__)
 
 
 def fill_up_weights(up):
@@ -53,7 +51,7 @@ def fill_up_weights(up):
 class DRNSeg(nn.Module):
 
     def __init__(self, model_name, classes, pretrained_model=None,
-                 pretrained=True, use_torch_up=False):
+                 pretrained=True, use_torch_up=False, out_dir=".", multi_gpu=False):
         super(DRNSeg, self).__init__()
         model = drn.__dict__.get(model_name)(
             pretrained=pretrained, num_classes=1000)
@@ -78,6 +76,8 @@ class DRNSeg(nn.Module):
             fill_up_weights(up)
             up.weight.requires_grad = False
             self.up = up
+
+        self.logger = DRNLogger(__name__, filepath=out_dir)
 
     def forward(self, x):
         x = self.base(x)
@@ -154,24 +154,42 @@ def resize_4d_tensor(tensor, width, height):
     return out
 
 
-def build_model(arch, num_classes, pretrained=None):
-    single_model = DRNSeg(arch, num_classes, None, pretrained=True)
+def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=False):
+    model = DRNSeg(arch, num_classes, None, pretrained=True, out_dir=out_dir)
 
     if pretrained:
         data = torch.load(pretrained)
         if "state_dict" in data:
             state_dict = data["state_dict"]
-            state_dict = OrderedDict([(k.replace("module.", ""), v) for k, v in state_dict.items()])
-            single_model.load_state_dict(state_dict)
-        else:
-            single_model.load_state_dict(data)
-    model = torch.nn.DataParallel(single_model).cuda()
+            data = OrderedDict([(k.replace("module.", ""), v) for k, v in state_dict.items()])
+
+        model_dict = model.state_dict()
+
+        # Remove the last layer, which is called seg.
+        skip_last = data["seg.weight"].shape[0] != model_dict["seg.weight"].shape[0]
+
+        # Filter out unnecessary keys.
+        filtered = {}
+        for k, v in data.items():
+            if k in model_dict.keys():
+                # If the last layers weren't the same size, don't update those last layer keys.
+                if skip_last and ("seg." in k or "up." in k):
+                    continue
+
+                filtered[k] = v
+
+        # Overwrite entries in the existing state dict
+        model_dict.update(filtered)
+
+        # Load the new state dict
+        model.load_state_dict(model_dict)
+    model = torch.nn.DataParallel(model).cuda()
 
     return model
 
 
 def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, workers=1,
-                     ms=False, num_transforms=0, random_rotate=None, random_scale=None,
+                     ms=False, num_transforms=1, random_rotate=None, random_scale=None,
                      crop_sizes=None, scales=None, background=True):
     if split not in ('train', 'test', 'val'):
         raise Exception("Split {} mut be one of ('train', 'test', 'val')".format(split))
@@ -207,6 +225,11 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
     # Provide the name of the image if we are testing.
     out_name = split == "test"
 
+    progress_t = [transforms.flip,
+                  transforms.rotate,
+                  transforms.crop,
+                  transforms.resize]
+
     if dataset_name == "seglist":
         if ms and split == 'test' and scales is not None:
             dataset = SegListMS(data_dir, split, transforms.Compose(t + t_always), scales, list_dir=list_dir)
@@ -214,18 +237,16 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
             dataset = SegList(data_dir, split, transforms.Compose(t + t_always), list_dir=list_dir, out_name=out_name)
     elif dataset_name == "progress_tools":
         if split == "train":
-            dataset = ProgressTools(data_dir, split, transforms.Compose(t), transforms.Compose(t_always),
-                                    num_transforms=num_transforms, out_name=out_name, background=background)
-        else:
-            dataset = ProgressTools(data_dir, split, None, transforms.Compose(t_always),
+            dataset = ProgressTools(data_dir, split, progress_t, num_transforms=num_transforms,
                                     out_name=out_name, background=background)
+        else:
+            dataset = ProgressTools(data_dir, split, out_name=out_name, background=background)
     elif dataset_name == "progress_tool_parts":
         if split == "train":
-            dataset = ProgressToolParts(data_dir, split, transforms.Compose(t), transforms.Compose(t_always),
-                                        num_transforms=num_transforms, out_name=out_name, background=background)
+            dataset = ProgressToolParts(data_dir, split, transforms, num_transforms=num_transforms,
+                                        out_name=out_name, background=background)
         else:
-            dataset = ProgressTools(data_dir, split, None, transforms.Compose(t_always),
-                                    out_name=out_name, background=background)
+            dataset = ProgressToolParts(data_dir, split, out_name=out_name, background=background)
     else:
         raise Exception("Unrecognized dataset {}".format(dataset_name))
 
@@ -238,7 +259,7 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
     return loader
 
 
-def validate(val_loader, model, criterion, eval_score=accuracy, print_freq=10):
+def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_freq=10):
     batch_time = AverageMeter()
     losses = AverageMeter()
     score = AverageMeter()
@@ -283,9 +304,9 @@ def validate(val_loader, model, criterion, eval_score=accuracy, print_freq=10):
     return score.avg
 
 
-def train(args, train_loader, model, criterion, optimizer,
+def train(args, train_loader, model, criterion, optimizer, logger,
           val_loader=None, start_epoch=0, eval_score=accuracy,
-          print_freq=10, best_prec1=0):
+          print_freq=10, checkpoint_freq=500, best_prec1=0):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -353,6 +374,16 @@ def train(args, train_loader, model, criterion, optimizer,
                                 epoch + 1, args.epochs, i, len(train_loader), time_elapsed, time_left, time_estimate,
                                 batch_time=batch_time, data_time=data_time, loss=losses, top1=scores))
 
+            if i % checkpoint_freq == 0 and i > 0:
+                checkpoint_path = os.path.join(args.out_dir, 'checkpoint_{}_{}.pth.tar'.format(epoch, i))
+                save_checkpoint({
+                    'epoch': epoch,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'best_prec1': best_prec1,
+                }, False, filename=checkpoint_path)
+                logger.info("Saved checkpoint to {}".format(checkpoint_path))
+
         # evaluate on validation set
         is_best = False
         if val_loader is not None:
@@ -368,12 +399,14 @@ def train(args, train_loader, model, criterion, optimizer,
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
         }, is_best, filename=checkpoint_path)
+        logger.info("Saved checkpoint to {}".format(checkpoint_path))
+
         if (epoch + 1) % 1 == 0:
             history_path = os.path.join(args.out_dir, 'checkpoint_{:03d}.pth.tar'.format(epoch + 1))
             shutil.copyfile(checkpoint_path, history_path)
 
 
-def test(eval_data_loader, model, num_classes,
+def test(eval_data_loader, model, num_classes, logger,
          output_dir='pred', has_gt=True, save_vis=False):
     model.eval()
 
@@ -419,7 +452,7 @@ def test(eval_data_loader, model, num_classes,
         return round(np.nanmean(ious), 2)
 
 
-def test_ms(eval_data_loader, model, num_classes, scales,
+def test_ms(eval_data_loader, model, num_classes, scales, logger,
             output_dir='pred', has_gt=True, save_vis=False):
     model.eval()
     batch_time = AverageMeter()

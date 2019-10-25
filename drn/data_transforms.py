@@ -6,6 +6,48 @@ from PIL import Image, ImageOps
 import torch
 
 
+"""
+Simple transforms.
+"""
+def flip(image, mask):
+    if random.random() < 0.5:
+        image = TF.hflip(image)
+        mask = TF.hflip(mask)
+
+    return image, mask
+
+
+def rotate(image, mask):
+    angle = np.random.uniform(-np.pi, np.pi)
+    image = TF.rotate(image, angle, expand=True, resample=Image.BILINEAR)
+    mask = TF.rotate(mask, angle, expand=True, resample=Image.NEAREST)
+
+    return image, mask
+
+
+def crop(image, mask):
+    orig_w, orig_h = image.size
+    aspect = orig_h / orig_w
+
+    w = random.randint(100, orig_w)
+    h = int(w * aspect)
+
+    i = random.randint(0, orig_h - h)
+    j = random.randint(0, orig_w - w)
+
+    image = TF.crop(image, i, j, h, w)
+    mask = TF.crop(mask, i, j, h, w)
+
+    return image, mask
+
+
+def resize(image, mask):
+    image = TF.resize(image, (480, 640), interpolation=Image.BILINEAR)
+    mask = TF.resize(mask, (480, 640), interpolation=Image.NEAREST)
+
+    return image, mask
+
+
 class RandomCrop(object):
     def __init__(self, size):
         # if isinstance(size, numbers.Number):
@@ -340,15 +382,6 @@ class Compose(object):
         self.transforms = transforms
 
     def __call__(self, *args):
-        # print("----------------------------------")
         for t in self.transforms:
-            # print("Transform", type(t))
-            # print(*args)
             args = t(*args)
-            # print("returned")
-            # for a in args:
-            #     if type(a) == torch.Tensor:
-            #         print("\ttensor size", a.shape)
-            #     else:
-            #         print("\t", a)
         return args

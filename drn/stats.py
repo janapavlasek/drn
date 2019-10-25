@@ -35,11 +35,6 @@ def accuracy(output, target):
 
 
 def sec_to_str(delta):
-    # micro, sec = math.modf(delta)
-    # print(delta, sec, micro)
-    # sec = int(sec)
-    # micro = int(micro * 1000)
-    # print(sec, micro)
     t = datetime.timedelta(seconds=delta)
     s = str(t)
     return s.split(".")[0] + "s"
