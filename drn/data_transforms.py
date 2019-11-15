@@ -4,11 +4,13 @@ import random
 import numpy as np
 from PIL import Image, ImageOps
 import torch
-
+import torchvision.transforms.functional as TF
 
 """
 Simple transforms.
 """
+
+
 def flip(image, mask):
     if random.random() < 0.5:
         image = TF.hflip(image)

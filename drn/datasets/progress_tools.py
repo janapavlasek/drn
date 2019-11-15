@@ -70,8 +70,7 @@ class ProgressTools(Dataset):
 
         # Apply the transforms.
         if self.transforms is not None:
-            for tf in self.transforms:
-                img, mask = tf(img, mask)
+            img, mask = self.transforms(img, mask)
 
         # Apply these transforms always.
         img, mask = self.to_tensor(img, mask)

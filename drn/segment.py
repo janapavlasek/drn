@@ -62,7 +62,8 @@ class DRNSeg(nn.Module):
 
         self.seg = nn.Conv2d(model.out_dim, classes,
                              kernel_size=1, bias=True)
-        self.softmax = nn.LogSoftmax(dim=1)
+        # self.softmax = nn.LogSoftmax(dim=1)
+        self.softmax = nn.Softmax(dim=1)
         m = self.seg
         n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
         m.weight.data.normal_(0, math.sqrt(2. / n))
@@ -83,7 +84,8 @@ class DRNSeg(nn.Module):
         x = self.base(x)
         x = self.seg(x)
         y = self.up(x)
-        return self.softmax(y), x
+        # return self.softmax(y), x
+        return y, x
 
     def optim_parameters(self, memo=None):
         for param in self.base.parameters():
@@ -98,6 +100,8 @@ def adjust_learning_rate(args, optimizer, epoch):
     """
     if args.lr_mode == 'step':
         lr = args.lr * (0.1 ** (epoch // args.step))
+    elif args.lr_mode == 'step_t':
+        lr = args.lr / (1.0 + epoch // args.step)
     elif args.lr_mode == 'poly':
         lr = args.lr * (1 - epoch / args.epochs) ** 0.9
     else:
@@ -229,6 +233,7 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
                   transforms.rotate,
                   transforms.crop,
                   transforms.resize]
+    progress_t = transforms.Compose(progress_t)
 
     if dataset_name == "seglist":
         if ms and split == 'test' and scales is not None:
@@ -243,7 +248,7 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
             dataset = ProgressTools(data_dir, split, out_name=out_name, background=background)
     elif dataset_name == "progress_tool_parts":
         if split == "train":
-            dataset = ProgressToolParts(data_dir, split, transforms, num_transforms=num_transforms,
+            dataset = ProgressToolParts(data_dir, split, progress_t, num_transforms=num_transforms,
                                         out_name=out_name, background=background)
         else:
             dataset = ProgressToolParts(data_dir, split, out_name=out_name, background=background)
@@ -259,7 +264,7 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
     return loader
 
 
-def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_freq=10):
+def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_freq=50):
     batch_time = AverageMeter()
     losses = AverageMeter()
     score = AverageMeter()
@@ -269,8 +274,11 @@ def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_fr
 
     end = time.time()
 
+    logger.info('Running validation...')
+
     with torch.no_grad():
-        for i, (img, target) in enumerate(val_loader):
+        for i, data in enumerate(val_loader):
+            img, target = data[0], data[1]
             if type(criterion) in [torch.nn.modules.loss.L1Loss,
                                    torch.nn.modules.loss.MSELoss]:
                 target = target.float()
@@ -306,7 +314,7 @@ def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_fr
 
 def train(args, train_loader, model, criterion, optimizer, logger,
           val_loader=None, start_epoch=0, eval_score=accuracy,
-          print_freq=10, checkpoint_freq=500, best_prec1=0):
+          print_freq=10, checkpoint_freq=500, best_val_score=0, vis=None):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -316,9 +324,9 @@ def train(args, train_loader, model, criterion, optimizer, logger,
     model.train()
 
     end = time.time()
+    iteration = 0
 
     cudnn.benchmark = True
-    best_prec1 = best_prec1
 
     for epoch in range(start_epoch, args.epochs):
         # train for one epoch
@@ -374,30 +382,38 @@ def train(args, train_loader, model, criterion, optimizer, logger,
                                 epoch + 1, args.epochs, i, len(train_loader), time_elapsed, time_left, time_estimate,
                                 batch_time=batch_time, data_time=data_time, loss=losses, top1=scores))
 
+                if vis is not None:
+                    vis.update(iteration, losses.val, scores.val)
+
             if i % checkpoint_freq == 0 and i > 0:
                 checkpoint_path = os.path.join(args.out_dir, 'checkpoint_{}_{}.pth.tar'.format(epoch, i))
                 save_checkpoint({
                     'epoch': epoch,
                     'arch': args.arch,
                     'state_dict': model.state_dict(),
-                    'best_prec1': best_prec1,
+                    'best_val_score': best_val_score,
                 }, False, filename=checkpoint_path)
                 logger.info("Saved checkpoint to {}".format(checkpoint_path))
+
+            iteration += 1
 
         # evaluate on validation set
         is_best = False
         if val_loader is not None:
-            prec1 = validate(val_loader, model, criterion)
+            val_score = validate(val_loader, model, criterion, logger)
 
-            is_best = prec1 > best_prec1
-            best_prec1 = max(prec1, best_prec1)
+            is_best = val_score > best_val_score
+            best_val_score = max(val_score, best_val_score)
+
+            if vis is not None:
+                vis.update(iteration, losses.val, scores.val, val_score)
 
         checkpoint_path = os.path.join(args.out_dir, 'checkpoint_latest.pth.tar')
         save_checkpoint({
             'epoch': epoch + 1,
             'arch': args.arch,
             'state_dict': model.state_dict(),
-            'best_prec1': best_prec1,
+            'best_val_score': best_val_score,
         }, is_best, filename=checkpoint_path)
         logger.info("Saved checkpoint to {}".format(checkpoint_path))
 
