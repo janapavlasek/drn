@@ -97,7 +97,7 @@ class ProgressTools(Dataset):
         image_path = os.path.join(self.data_dir, "{}_images.txt".format(self.split))
         mask_path = os.path.join(self.data_dir, "{}_masks.txt".format(self.split))
 
-        assert os.path.exists(image_path)
+        assert os.path.exists(image_path), "Path does not exist: {}".format(image_path)
 
         self.image_list = [line.strip() for line in open(image_path, 'r')]
 
