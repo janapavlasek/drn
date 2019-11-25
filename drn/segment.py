@@ -50,8 +50,9 @@ def fill_up_weights(up):
 
 class DRNSeg(nn.Module):
 
-    def __init__(self, model_name, classes, pretrained_model=None,
-                 pretrained=True, use_torch_up=False, out_dir=".", multi_gpu=False):
+    def __init__(self, model_name, classes, pretrained_model=None, logger=None,
+                 pretrained=True, use_torch_up=False, out_dir=".", multi_gpu=False,
+                 softmax=False):
         super(DRNSeg, self).__init__()
         model = drn.__dict__.get(model_name)(
             pretrained=pretrained, num_classes=1000)
@@ -62,8 +63,9 @@ class DRNSeg(nn.Module):
 
         self.seg = nn.Conv2d(model.out_dim, classes,
                              kernel_size=1, bias=True)
-        # self.softmax = nn.LogSoftmax(dim=1)
-        self.softmax = nn.Softmax(dim=1)
+
+        self.softmax = nn.Softmax(dim=1) if softmax else nn.Identity()
+
         m = self.seg
         n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
         m.weight.data.normal_(0, math.sqrt(2. / n))
@@ -78,14 +80,15 @@ class DRNSeg(nn.Module):
             up.weight.requires_grad = False
             self.up = up
 
-        self.logger = DRNLogger(__name__, filepath=out_dir)
+        self.logger = logger
+        if type(logger) is not DRNLogger:
+            self.logger = DRNLogger(__name__, filepath=out_dir)
 
     def forward(self, x):
         x = self.base(x)
         x = self.seg(x)
         y = self.up(x)
-        # return self.softmax(y), x
-        return y, x
+        return self.softmax(y), x
 
     def optim_parameters(self, memo=None):
         for param in self.base.parameters():
@@ -158,8 +161,9 @@ def resize_4d_tensor(tensor, width, height):
     return out
 
 
-def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=False):
-    model = DRNSeg(arch, num_classes, None, pretrained=True, out_dir=out_dir)
+def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=False,
+                logger=None, parallel=True, softmax=False):
+    model = DRNSeg(arch, num_classes, pretrained=True, out_dir=out_dir, logger=logger, softmax=softmax)
 
     if pretrained:
         data = torch.load(pretrained)
@@ -171,6 +175,7 @@ def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=Fals
 
         # Remove the last layer, which is called seg.
         skip_last = data["seg.weight"].shape[0] != model_dict["seg.weight"].shape[0]
+        print("Skip last", skip_last)
 
         # Filter out unnecessary keys.
         filtered = {}
@@ -187,7 +192,11 @@ def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=Fals
 
         # Load the new state dict
         model.load_state_dict(model_dict)
-    model = torch.nn.DataParallel(model).cuda()
+
+    if parallel:
+        model = torch.nn.DataParallel(model)
+
+    model = model.cuda()
 
     return model
 
@@ -383,7 +392,11 @@ def train(args, train_loader, model, criterion, optimizer, logger,
                                 batch_time=batch_time, data_time=data_time, loss=losses, top1=scores))
 
                 if vis is not None:
-                    vis.update(iteration, losses.val, scores.val)
+                    data = next(iter(val_loader))
+                    img, mask = data[0][1, :, :, :].unsqueeze(0), data[1][1, :, :].unsqueeze(0)
+                    labels = get_test_prediction(img, model)
+                    mask = mask.squeeze().cpu().data.numpy()
+                    vis.update(iteration, losses.val, scores.val, None, labels, mask)
 
             if i % checkpoint_freq == 0 and i > 0:
                 checkpoint_path = os.path.join(args.out_dir, 'checkpoint_{}_{}.pth.tar'.format(epoch, i))
@@ -406,7 +419,12 @@ def train(args, train_loader, model, criterion, optimizer, logger,
             best_val_score = max(val_score, best_val_score)
 
             if vis is not None:
-                vis.update(iteration, losses.val, scores.val, val_score)
+                data = next(iter(val_loader))
+                print("from dataloader", data[0].shape, data[0].shape)
+                img, mask = data[0][1, :, :, :].unsqueeze(0), data[1][1, :, :].unsqueeze(0)
+                labels = get_test_prediction(img, model)
+                mask = mask.squeeze().cpu().data.numpy()
+                vis.update(iteration, losses.val, scores.val, val_score, labels, mask)
 
         checkpoint_path = os.path.join(args.out_dir, 'checkpoint_latest.pth.tar')
         save_checkpoint({
@@ -420,6 +438,15 @@ def train(args, train_loader, model, criterion, optimizer, logger,
         if (epoch + 1) % 1 == 0:
             history_path = os.path.join(args.out_dir, 'checkpoint_{:03d}.pth.tar'.format(epoch + 1))
             shutil.copyfile(checkpoint_path, history_path)
+
+
+def get_test_prediction(img, model):
+    img.cuda()
+    pred, features = model(img)
+    pred = torch.softmax(pred, dim=1)
+    _, labels = torch.max(pred, 1)
+    labels = labels.squeeze().cpu().data.numpy()
+    return labels
 
 
 def test(eval_data_loader, model, num_classes, logger,
