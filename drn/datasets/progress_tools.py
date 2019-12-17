@@ -64,9 +64,10 @@ class ProgressTools(Dataset):
         mask = None
         if self.labels:
             mask_path = self.mask_list[list_idx]
-            if not self.background:
-                mask_path = mask_path.replace("labels.png", "labels_train.png")
             mask = Image.open(mask_path)
+            if not self.background:
+                # Background is the 0 element so remove this.
+                mask = Image.fromarray(np.array(mask) - 1)
 
         # Apply the transforms.
         if self.transforms is not None:
@@ -125,27 +126,23 @@ class ProgressToolParts(ProgressTools):
 
         self.CLASS_LABELS = {"__background__": 0,
                              "clamp_bar": 1,
+                             "clamp_top_clamp": 2,
                              "clamp_bottom_clamp": 3,
                              "clamp_handle": 4,
-                             "clamp_top_clamp": 2,
                              "flashlight_base": 5,
                              "flashlight_light": 6,
-                             "flashlight_stand": 7,
-                             "grey_pliers_handle": 10,
-                             "grey_pliers_left_pinch": 9,
-                             "grey_pliers_right_pinch": 8,
-                             "hammer_handle": 11,
-                             "hammer_head": 12,
-                             "knife_blade": 14,
-                             "knife_handle": 13,
-                             "longnose_pliers_handle": 17,
-                             "longnose_pliers_left_pinch": 16,
-                             "longnose_pliers_right_pinch": 15,
-                             "red_pliers_handle": 20,
-                             "red_pliers_left_pinch": 19,
-                             "red_pliers_right_pinch": 18,
-                             "screwdriver_handle": 21,
-                             "screwdriver_tip": 22}
+                             "grey_pliers_handle": 7,
+                             "grey_pliers_pinch": 8,
+                             "hammer_handle": 9,
+                             "hammer_head": 10,
+                             "knife_blade": 11,
+                             "knife_handle": 12,
+                             "longnose_pliers_handle": 13,
+                             "longnose_pliers_pinch": 14,
+                             "red_pliers_handle": 15,
+                             "red_pliers_pinch": 16,
+                             "screwdriver_handle": 17,
+                             "screwdriver_tip": 18}
 
         self.CLASSES = [k for k in self.CLASS_LABELS.keys()]
         self.CLASSES = sorted(self.CLASSES, key=lambda x: self.CLASS_LABELS[x])

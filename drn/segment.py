@@ -17,7 +17,7 @@ from torch.backends import cudnn
 
 from . import drn
 
-from .stats import AverageMeter, sec_to_str, accuracy
+from .stats import AverageMeter, sec_to_str, accuracy, iou
 from .log_util import DRNLogger
 from .io_util import save_output_images, save_colorful_images, save_checkpoint
 from . import data_transforms as transforms
@@ -175,7 +175,6 @@ def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=Fals
 
         # Remove the last layer, which is called seg.
         skip_last = data["seg.weight"].shape[0] != model_dict["seg.weight"].shape[0]
-        print("Skip last", skip_last)
 
         # Filter out unnecessary keys.
         filtered = {}
@@ -203,10 +202,8 @@ def build_model(arch, num_classes, pretrained=None, out_dir=None, multi_gpu=Fals
 
 def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, workers=1,
                      ms=False, num_transforms=1, random_rotate=None, random_scale=None,
-                     crop_sizes=None, scales=None, background=True):
-    if split not in ('train', 'test', 'val'):
-        raise Exception("Split {} mut be one of ('train', 'test', 'val')".format(split))
-
+                     crop_sizes=None, scales=None, background=True, shuffle=True,
+                     out_name=False, transform=True):
     t = []
     t_always = []
 
@@ -233,11 +230,6 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
 
         t_always.append(normalize)
 
-    shuffle = split == 'train'
-
-    # Provide the name of the image if we are testing.
-    out_name = split == "test"
-
     progress_t = [transforms.flip,
                   transforms.rotate,
                   transforms.crop,
@@ -250,13 +242,13 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
         else:
             dataset = SegList(data_dir, split, transforms.Compose(t + t_always), list_dir=list_dir, out_name=out_name)
     elif dataset_name == "progress_tools":
-        if split == "train":
+        if transform:
             dataset = ProgressTools(data_dir, split, progress_t, num_transforms=num_transforms,
                                     out_name=out_name, background=background)
         else:
             dataset = ProgressTools(data_dir, split, out_name=out_name, background=background)
     elif dataset_name == "progress_tool_parts":
-        if split == "train":
+        if transform:
             dataset = ProgressToolParts(data_dir, split, progress_t, num_transforms=num_transforms,
                                         out_name=out_name, background=background)
         else:
@@ -273,7 +265,7 @@ def make_data_loader(split, dataset_name, data_dir, list_dir, batch_size=4, work
     return loader
 
 
-def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_freq=50):
+def validate(val_loader, model, criterion, logger, eval_score=iou, print_freq=50):
     batch_time = AverageMeter()
     losses = AverageMeter()
     score = AverageMeter()
@@ -308,13 +300,20 @@ def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_fr
             batch_time.update(time.time() - end)
             end = time.time()
 
+            batches_left = len(val_loader) - i - 1
+
+            time_left = sec_to_str(batches_left * batch_time.avg)
+            time_elapsed = sec_to_str(batch_time.sum)
+            time_estimate = sec_to_str(batch_time.avg * len(val_loader))
+
             if i % print_freq == 0:
-                logger.info('Test: [{0}/{1}]\t'
-                            'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                            'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                logger.info('Batch: [{0}/{1}]  '
+                            'Elapsed: {elapsed}  '
+                            'ETA: {left} / {total}  '
+                            'Loss {loss.val:.4f} ({loss.avg:.4f})  '
                             'Score {score.val:.3f} ({score.avg:.3f})'.format(
-                                i, len(val_loader), batch_time=batch_time, loss=losses,
-                                score=score))
+                                i, len(val_loader), elapsed=time_elapsed, left=time_left,
+                                total=time_estimate, loss=losses, score=score))
 
     logger.info(' * Score {top1.avg:.3f}'.format(top1=score))
 
@@ -322,7 +321,7 @@ def validate(val_loader, model, criterion, logger, eval_score=accuracy, print_fr
 
 
 def train(args, train_loader, model, criterion, optimizer, logger,
-          val_loader=None, start_epoch=0, eval_score=accuracy,
+          val_loader=None, start_epoch=0, eval_score=iou,
           print_freq=10, checkpoint_freq=500, best_val_score=0, vis=None):
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -392,11 +391,16 @@ def train(args, train_loader, model, criterion, optimizer, logger,
                                 batch_time=batch_time, data_time=data_time, loss=losses, top1=scores))
 
                 if vis is not None:
-                    data = next(iter(val_loader))
-                    img, mask = data[0][1, :, :, :].unsqueeze(0), data[1][1, :, :].unsqueeze(0)
-                    labels = get_test_prediction(img, model)
-                    mask = mask.squeeze().cpu().data.numpy()
-                    vis.update(iteration, losses.val, scores.val, None, labels, mask)
+                    # Get best and worst.
+                    ious = eval_score(output, target, reduction='none')
+                    best, worst = ious.argmax(), ious.argmin()
+                    _, labels = torch.max(torch.softmax(output, dim=1), 1)
+
+                    labels = torch.cat((labels[best].unsqueeze(0), labels[worst].unsqueeze(0))).cpu().data.numpy()
+                    masks = torch.cat((target[best].unsqueeze(0), target[worst].unsqueeze(0))).cpu().data.numpy()
+
+                    imgs = torch.cat((img[best].unsqueeze(0), img[worst].unsqueeze(0))).cpu().data.numpy()
+                    vis.update(iteration, losses.val, scores.val, None, labels, masks, imgs)
 
             if i % checkpoint_freq == 0 and i > 0:
                 checkpoint_path = os.path.join(args.out_dir, 'checkpoint_{}_{}.pth.tar'.format(epoch, i))
@@ -419,12 +423,14 @@ def train(args, train_loader, model, criterion, optimizer, logger,
             best_val_score = max(val_score, best_val_score)
 
             if vis is not None:
-                data = next(iter(val_loader))
-                print("from dataloader", data[0].shape, data[0].shape)
-                img, mask = data[0][1, :, :, :].unsqueeze(0), data[1][1, :, :].unsqueeze(0)
-                labels = get_test_prediction(img, model)
-                mask = mask.squeeze().cpu().data.numpy()
-                vis.update(iteration, losses.val, scores.val, val_score, labels, mask)
+                # Get best and worst.
+                ious = eval_score(output, target, reduction='none')
+                best, worst = ious.argmax(), ious.argmin()
+                _, labels = torch.max(torch.softmax(output, dim=1), 1)
+                labels = torch.cat((labels[best].unsqueeze(0), labels[worst].unsqueeze(0))).cpu().data.numpy()
+                masks = torch.cat((target[best].unsqueeze(0), target[worst].unsqueeze(0))).cpu().data.numpy()
+                imgs = torch.cat((img[best].unsqueeze(0), img[worst].unsqueeze(0))).cpu().data.numpy()
+                vis.update(iteration, losses.val, scores.val, val_score, labels, masks, imgs)
 
         checkpoint_path = os.path.join(args.out_dir, 'checkpoint_latest.pth.tar')
         save_checkpoint({
