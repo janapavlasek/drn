@@ -38,7 +38,7 @@ def accuracy(output, target):
     return score.item()
 
 
-def iou(output, target, eps=1e-7, reduction='mean', smooth=0.0, dims=None):
+def iou(output, target, eps=1e-7, reduction='mean', smooth=0.0, dims=None, ignore_index=255):
     """IoU where both are shape (B, H, W) where each pixel is a label."""
     assert reduction in ['mean', 'sum', 'none']
 
@@ -46,13 +46,19 @@ def iou(output, target, eps=1e-7, reduction='mean', smooth=0.0, dims=None):
 
     bs = target.size(0)
     num_classes = probs.size(1)
-    dims = (0, 2)  # TODO don't reduce over batches if reduction is None.
+    dims = (0, 2) if reduction != 'none' else 2  # Don't reduce over batches if reduction is None.
 
     target = target.view(bs, -1)
     probs = probs.view(bs, num_classes, -1)
 
-    target = F.one_hot(target, num_classes)  # N,H*W -> N,H*W, C
-    target = target.permute(0, 2, 1).to(probs.device).to(probs.dtype)  # H, C, H*W
+    if (target == ignore_index).nonzero().size(0) > 0:
+        target = target.masked_fill(target == ignore_index, num_classes)
+        target = F.one_hot(target, num_classes + 1)
+        target = target.permute(0, 2, 1).to(probs.device).to(probs.dtype)  # N, C + 1, H*W
+        target = target[:, :-1, :]
+    else:
+        target = F.one_hot(target, num_classes)  # N,H*W -> N,H*W, C
+        target = target.permute(0, 2, 1).to(probs.device).to(probs.dtype)  # N, C, H*W
 
     intersection = torch.sum(probs * target, dim=dims)
     cardinality = torch.sum(probs + target, dim=dims)
@@ -65,10 +71,10 @@ def iou(output, target, eps=1e-7, reduction='mean', smooth=0.0, dims=None):
     elif reduction == 'sum':
         return jaccard_score.sum().item()
     else:
-        return jaccard_score.mean()  # .item()  # .mean(dim=1)
+        return jaccard_score.mean(dim=1)
 
 
-def jaccard_loss(output, target, eps=1e-7):
+def jaccard_loss(output, target, smooth=0.0, eps=1e-7):
     """Computes the Jaccard loss, a.k.a the IoU loss.
     Note that PyTorch optimizers minimize a loss. In this
     case, we would like to maximize the jaccard loss so we
