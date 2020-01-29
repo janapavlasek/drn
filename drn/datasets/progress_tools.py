@@ -30,8 +30,11 @@ class ProgressTools(Dataset):
 
     def __init__(self, data_dir, split, transforms=None, num_transforms=1,
                  out_name=False, labels=True, background=True, normalize=True):
+        # Reindex the classes if there is no background.
+        if not background and '__background__' in self.CLASS_LABELS:
+            self.CLASS_LABELS = {k: v - 1 for k, v in self.CLASS_LABELS.items() if k != '__background__'}
 
-        self.CLASSES = sorted(self.CLASSES, key=lambda x: self.CLASS_LABELS[x])
+        self.CLASSES = sorted(self.CLASS_LABELS.keys(), key=lambda x: self.CLASS_LABELS[x])
 
         self.data_dir = data_dir
         self.labels = labels
@@ -121,28 +124,25 @@ class ProgressTools(Dataset):
 
 class ProgressToolParts(ProgressTools):
 
+    CLASS_LABELS = {"__background__": 0,
+                    "clamp_bar": 1,
+                    "clamp_top_clamp": 2,
+                    "clamp_bottom_clamp": 3,
+                    "clamp_handle": 4,
+                    "flashlight_base": 5,
+                    "flashlight_light": 6,
+                    "grey_pliers_handle": 7,
+                    "grey_pliers_pinch": 8,
+                    "hammer_handle": 9,
+                    "hammer_head": 10,
+                    "knife_blade": 11,
+                    "knife_handle": 12,
+                    "longnose_pliers_handle": 13,
+                    "longnose_pliers_pinch": 14,
+                    "red_pliers_handle": 15,
+                    "red_pliers_pinch": 16,
+                    "screwdriver_handle": 17,
+                    "screwdriver_tip": 18}
+
     def __init__(self, *args, **kwargs):
         super(ProgressToolParts, self).__init__(*args, **kwargs)
-
-        self.CLASS_LABELS = {"__background__": 0,
-                             "clamp_bar": 1,
-                             "clamp_top_clamp": 2,
-                             "clamp_bottom_clamp": 3,
-                             "clamp_handle": 4,
-                             "flashlight_base": 5,
-                             "flashlight_light": 6,
-                             "grey_pliers_handle": 7,
-                             "grey_pliers_pinch": 8,
-                             "hammer_handle": 9,
-                             "hammer_head": 10,
-                             "knife_blade": 11,
-                             "knife_handle": 12,
-                             "longnose_pliers_handle": 13,
-                             "longnose_pliers_pinch": 14,
-                             "red_pliers_handle": 15,
-                             "red_pliers_pinch": 16,
-                             "screwdriver_handle": 17,
-                             "screwdriver_tip": 18}
-
-        self.CLASSES = [k for k in self.CLASS_LABELS.keys()]
-        self.CLASSES = sorted(self.CLASSES, key=lambda x: self.CLASS_LABELS[x])
